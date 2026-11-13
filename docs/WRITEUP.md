@@ -99,6 +99,6 @@ The idea is **"publish early, encrypted; release a key on approval"**. It fits a
 - **Student app:** https://zerohour-publicbucket-u1yrxzfhm0pv.s3.ap-south-1.amazonaws.com/index.html (synthetic data; IDs look like `DEMO23CS00001`)
 - **Control room:** https://zerohour-publicbucket-u1yrxzfhm0pv.s3.ap-south-1.amazonaws.com/dashboard.html
 - **Demo video:** _add YouTube link_
-- **Code:** _add GitHub link_
+- **Code:** https://github.com/mohammed-tousif/zerohour
 
 *All data in ZeroHour is synthetic. No real student information is used.*
