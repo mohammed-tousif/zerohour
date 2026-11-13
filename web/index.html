@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>ZeroHour Results</title>
+    <meta name="description" content="Your exam result, saved encrypted on your phone before results day and unlocked the moment it is released." />
+    <meta name="theme-color" content="#0b1324" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="%STYLES%" />
+    <script type="module" src="%APP%"></script>
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>ZeroHour</div>
+      <span class="pill">Demo · synthetic data</span>
+    </header>
+
+    <main>
+      <div id="banner" class="banner" role="alert" hidden></div>
+
+      <!-- 1. Enter USN + DOB once -->
+      <section id="setup" hidden>
+        <h1>Get your result the second it's released</h1>
+        <p class="lead">
+          Your encrypted result downloads to this phone now. At release time only a tiny key is sent, so the
+          results site can't crash under the rush.
+        </p>
+        <form id="setup-form" class="card" novalidate>
+          <label for="usn">University Seat Number (USN)</label>
+          <input id="usn" name="usn" autocomplete="off" autocapitalize="characters" spellcheck="false"
+            placeholder="DEMO23CS00001" required />
+          <p id="usn-error" class="field-error" hidden></p>
+
+          <label for="dob">Date of birth</label>
+          <input id="dob" name="dob" type="date" min="1980-01-01" max="2015-12-31" required />
+          <p id="dob-error" class="field-error" hidden></p>
+
+          <button id="setup-submit" type="submit">Save my encrypted result</button>
+          <p class="hint">Demo IDs look like <code>DEMO23CS00001</code>. Nothing here is real student data.</p>
+        </form>
+      </section>
+
+      <!-- 2. Saved and locked: countdown -->
+      <section id="locked" hidden>
+        <p class="chip chip-locked"><span aria-hidden="true">🔒</span> Locked</p>
+        <div class="countdown-wrap">
+          <p id="countdown" class="countdown" aria-live="off">--:--:--</p>
+          <p id="countdown-label" class="countdown-label">until results are released</p>
+        </div>
+
+        <div class="card saved">
+          <div class="saved-row">
+            <span class="tick" aria-hidden="true">✓</span>
+            <div>
+              <p class="saved-title">Your result is saved on this phone</p>
+              <p class="muted"><span id="saved-usn"></span> · <span id="saved-size"></span> · encrypted</p>
+            </div>
+          </div>
+          <p class="explain">
+            No one can open it yet: not the university, not us, not AWS. The key that unlocks it isn't published
+            anywhere until the officials release results. When they do, this page opens it by itself.
+          </p>
+        </div>
+
+        <p id="poll-status" class="status" aria-live="polite"></p>
+        <button id="forget" class="link" type="button">Use a different USN</button>
+      </section>
+
+      <!-- 3. Released and decrypted on the phone -->
+      <section id="result" hidden>
+        <p class="chip chip-open"><span aria-hidden="true">🔓</span> Released</p>
+        <p id="decrypted-at" class="proof"></p>
+
+        <div class="card student">
+          <div>
+            <p id="r-name" class="student-name"></p>
+            <p id="r-meta" class="muted"></p>
+          </div>
+          <div class="score">
+            <p class="sgpa-label">SGPA</p>
+            <p id="r-sgpa" class="sgpa"></p>
+            <p id="r-status" class="badge"></p>
+          </div>
+        </div>
+
+        <div class="card table-card">
+          <table>
+            <caption class="sr-only">Subject-wise marks</caption>
+            <thead>
+              <tr><th scope="col">Subject</th><th scope="col">Int</th><th scope="col">Ext</th><th scope="col">Total</th><th scope="col">Grade</th></tr>
+            </thead>
+            <tbody id="r-subjects"></tbody>
+          </table>
+        </div>
+        <p class="hint">Synthetic demo data. Pass = total ≥ 40 and external ≥ 18.</p>
+        <button id="forget-2" class="link" type="button">Check a different USN</button>
+      </section>
+
+      <!-- Wrong DOB after release: keep the file, ask again -->
+      <section id="retry" hidden>
+        <h1>That date of birth didn't open the result</h1>
+        <p class="lead">Results are released, but the file saved for <strong id="retry-usn"></strong> didn't open with the date of birth you entered.</p>
+        <form id="retry-form" class="card" novalidate>
+          <label for="retry-dob">Date of birth</label>
+          <input id="retry-dob" type="date" min="1980-01-01" max="2015-12-31" required />
+          <p id="retry-error" class="field-error" hidden></p>
+          <button type="submit">Try again</button>
+        </form>
+        <button id="forget-3" class="link" type="button">Start over with a different USN</button>
+      </section>
+
+      <section id="loading" class="loading" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span><span id="loading-text">Loading…</span>
+      </section>
+    </main>
+
+    <footer class="foot">
+      Encrypted with AES-256-GCM. Decrypted only on this device.
+    </footer>
+  </body>
+</html>

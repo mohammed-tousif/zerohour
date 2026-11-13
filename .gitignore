@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.aws-sam/
+coverage/
+
+# Generated synthetic data and local staging output (regenerate with scripts)
+data/
+out/
+
+# Local secrets / config
+.env
+.env.*
+samconfig.toml
+*.pem
+.bundle-check/

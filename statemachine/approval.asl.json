@@ -1,0 +1,77 @@
+{
+  "Comment": "ZeroHour release: wait (paused, no compute) until 2 of 3 officials approve, then publish the key. Input: {batchId}.",
+  "StartAt": "WaitForApprovals",
+  "States": {
+    "WaitForApprovals": {
+      "Type": "Task",
+      "Comment": "openApprovals marks the flow OPEN and stores this task token; the approve API calls SendTaskSuccess on the 2nd approval",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${OpenApprovalsFunctionArn}",
+        "Payload": {
+          "batchId.$": "$.batchId",
+          "taskToken.$": "$$.Task.Token"
+        }
+      },
+      "TimeoutSeconds": 604800,
+      "ResultPath": "$.approval",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 10,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 60,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.Timeout"],
+          "Next": "ApprovalTimedOut"
+        }
+      ],
+      "Next": "PublishKey"
+    },
+    "PublishKey": {
+      "Type": "Task",
+      "Comment": "Write release.json {released:true, key}, invalidate it on CloudFront, mark the batch RELEASED",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${PublishKeyFunctionArn}",
+        "Payload": {
+          "batchId.$": "$.batchId"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 10,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 60,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "End": true
+    },
+    "ApprovalTimedOut": {
+      "Type": "Fail",
+      "Error": "ApprovalTimedOut",
+      "Cause": "Fewer than 2 of 3 officials approved within 7 days; results stay locked."
+    }
+  }
+}

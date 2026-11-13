@@ -1,0 +1,13 @@
+{
+  "name": "ZeroHour Results",
+  "short_name": "ZeroHour",
+  "description": "Your exam result, saved encrypted on your phone and unlocked the moment it is released.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0b1324",
+  "theme_color": "#0b1324",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

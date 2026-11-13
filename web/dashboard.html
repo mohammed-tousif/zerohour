@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ZeroHour Control Room</title>
+    <meta name="description" content="Live view of a ZeroHour results release: staged results, approvals, release state, CDN traffic and estimated cost." />
+    <meta name="robots" content="noindex" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="%DASH_STYLES%" />
+    <script type="module" src="%DASH_APP%"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand"><span class="mark" aria-hidden="true"></span>ZeroHour <span class="sub">Control room</span></div>
+      <div class="meta">
+        <span>Batch <strong id="batch-id">—</strong></span>
+        <span id="live" class="live" aria-live="polite"><span class="live-dot" aria-hidden="true"></span>Connecting…</span>
+      </div>
+    </header>
+
+    <main>
+      <p id="error" class="error" role="alert" hidden></p>
+
+      <section class="kpis" aria-label="Release overview">
+        <article class="tile">
+          <h2>Results staged at the edge</h2>
+          <p id="k-staged" class="hero">—</p>
+          <p id="k-staged-sub" class="muted">encrypted · unreadable until release</p>
+        </article>
+        <article class="tile">
+          <h2>Release</h2>
+          <p id="k-release-chip" class="chip">—</p>
+          <p id="k-release" class="figure">—</p>
+          <p id="k-release-sub" class="muted"></p>
+        </article>
+        <article class="tile">
+          <h2>Official approvals</h2>
+          <p class="figure"><span id="k-approvals">0</span><span class="of"> of <span id="k-required">2</span> required</span></p>
+          <div id="k-dots" class="dots" role="img" aria-label="Approvals"></div>
+          <p id="k-approvals-sub" class="muted"></p>
+        </article>
+        <article class="tile">
+          <h2>Results-day cost, last hour</h2>
+          <p id="k-cost" class="hero">—</p>
+          <p id="k-cost-sub" class="muted">estimate · list price</p>
+        </article>
+      </section>
+
+      <section class="charts" aria-label="CloudFront traffic">
+        <article class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>Requests per minute</h2>
+              <p class="muted">CloudFront · all edge locations · last 60 minutes</p>
+            </div>
+            <button class="ghost" type="button" data-table-for="chart-requests" aria-expanded="false">Table</button>
+          </header>
+          <div id="chart-requests" class="chart"></div>
+        </article>
+        <article class="panel">
+          <header class="panel-head">
+            <div>
+              <h2>Error rate</h2>
+              <p class="muted">4xx + 5xx as % of requests · last 60 minutes</p>
+            </div>
+            <button class="ghost" type="button" data-table-for="chart-errors" aria-expanded="false">Table</button>
+          </header>
+          <div id="chart-errors" class="chart"></div>
+        </article>
+      </section>
+
+      <section class="lower">
+        <article class="panel">
+          <h2>Cost estimate</h2>
+          <p id="cost-note" class="muted"></p>
+          <div id="cost-tables"></div>
+        </article>
+        <article class="panel">
+          <h2>Integrity</h2>
+          <p class="muted">Every encrypted file's SHA-256 is in <code>manifest.json</code>; this fingerprint covers them all. Files are write-locked with S3 Object Lock.</p>
+          <p class="hash" id="root-hash">—</p>
+          <dl class="facts">
+            <dt>Staged at</dt><dd id="f-staged">—</dd>
+            <dt>Release time</dt><dd id="f-release-at">—</dd>
+            <dt>Released at</dt><dd id="f-released-at">—</dd>
+            <dt>Batch status</dt><dd id="f-status">—</dd>
+          </dl>
+        </article>
+      </section>
+    </main>
+    <footer class="foot">Status refreshes every 2 s · traffic and cost every 15 s · synthetic demo data</footer>
+  </body>
+</html>

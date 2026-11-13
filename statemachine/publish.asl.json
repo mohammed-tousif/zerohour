@@ -1,0 +1,185 @@
+{
+  "Comment": "ZeroHour publish: results CSV in S3 -> one encrypted file per student behind CloudFront, plus an integrity manifest. Input: {batchId, csvKey, releaseAt}.",
+  "StartAt": "CreateBatch",
+  "States": {
+    "CreateBatch": {
+      "Type": "Task",
+      "Comment": "KMS data key for the batch, DynamoDB record, release.json {released:false}",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${CreateBatchFunctionArn}",
+        "Payload.$": "$"
+      },
+      "ResultSelector": {
+        "batchId.$": "$.Payload.batchId",
+        "csvKey.$": "$.Payload.csvKey",
+        "releaseAt.$": "$.Payload.releaseAt",
+        "resumed.$": "$.Payload.resumed"
+      },
+      "ResultPath": "$.batch",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 10,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 60,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "EncryptAll"
+    },
+    "EncryptAll": {
+      "Type": "Map",
+      "Comment": "Distributed Map over the CSV; each child encrypts one batch of rows. MaxConcurrency 8 stays under the default 10 concurrent Lambda executions of a new account.",
+      "Label": "EncryptAll",
+      "ItemReader": {
+        "Resource": "arn:aws:states:::s3:getObject",
+        "ReaderConfig": {
+          "InputType": "CSV",
+          "CSVHeaderLocation": "FIRST_ROW"
+        },
+        "Parameters": {
+          "Bucket": "${RawBucketName}",
+          "Key.$": "$.batch.csvKey"
+        }
+      },
+      "ItemBatcher": {
+        "MaxItemsPerBatch": 350,
+        "MaxInputBytesPerBatch": 240000,
+        "BatchInput": {
+          "batchId.$": "$.batch.batchId"
+        }
+      },
+      "MaxConcurrency": 8,
+      "ToleratedFailurePercentage": 0,
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "EXPRESS"
+        },
+        "StartAt": "EncryptBatch",
+        "States": {
+          "EncryptBatch": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${EncryptBatchFunctionArn}",
+              "Payload.$": "$"
+            },
+            "OutputPath": "$.Payload",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 3,
+                "MaxAttempts": 10,
+                "BackoffRate": 2,
+                "MaxDelaySeconds": 60,
+                "JitterStrategy": "FULL"
+              },
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 4,
+                "BackoffRate": 2,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "ResultPath": null,
+      "Next": "FinalizeManifest"
+    },
+    "FinalizeManifest": {
+      "Type": "Task",
+      "Comment": "Merge partial manifests, check one file per CSV row, write manifest.json, mark batch STAGED",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${FinalizeManifestFunctionArn}",
+        "Payload": {
+          "batchId.$": "$.batch.batchId"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 10,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 60,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "ScheduleRelease"
+    },
+    "ScheduleRelease": {
+      "Type": "Task",
+      "Comment": "Start the releaseWaiter durable function (async): it sleeps until releaseAt at no compute cost, then opens approvals",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ReleaseWaiterAliasArn}",
+        "InvocationType": "Event",
+        "Payload": {
+          "batchId.$": "$.batchId"
+        }
+      },
+      "ResultPath": null,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 10,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 60,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "End": true
+    }
+  }
+}

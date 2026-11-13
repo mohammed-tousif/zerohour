@@ -1,0 +1,711 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ZeroHour M2 - encrypted exam results staged at the edge. Raw CSV (private, KMS) ->
+  Step Functions Distributed Map -> Lambda encrypts each student's result ->
+  S3 (Object Lock) behind CloudFront. Synthetic demo data only.
+
+Parameters:
+  RetentionDays:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 30
+    Description: Days each encrypted result is held under S3 Object Lock (GOVERNANCE mode).
+  PriceClass:
+    Type: String
+    Default: PriceClass_200
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
+    Description: CloudFront edge locations. PriceClass_200 includes India.
+  EnableCdn:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Create the CloudFront distribution. Set 'false' while the AWS account is
+      still waiting for CloudFront verification; everything else deploys and works.
+
+Conditions:
+  CdnEnabled: !Equals [!Ref EnableCdn, 'true']
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    MemorySize: 512
+    Timeout: 60
+    Environment:
+      Variables:
+        PUBLIC_BUCKET: !Ref PublicBucket
+        RAW_BUCKET: !Ref RawBucket
+        BATCHES_TABLE: !Ref BatchesTable
+        KEY_ID: !GetAtt ResultsKey.Arn
+        RETENTION_DAYS: !Ref RetentionDays
+        APPROVALS_TABLE: !Ref ApprovalsTable
+        DISTRIBUTION_ID: !If [CdnEnabled, !Ref Distribution, '']
+        NODE_OPTIONS: --enable-source-maps
+
+Resources:
+  # ------------------------------------------------------------------ keys + data
+
+  ResultsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: ZeroHour - wraps per-batch master keys and encrypts the raw CSV bucket
+      EnableKeyRotation: true
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AccountAdminViaIam
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+
+  ResultsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${AWS::StackName}-results
+      TargetKeyId: !Ref ResultsKey
+
+  BatchesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: batchId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: batchId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  # ------------------------------------------------------------------ buckets
+
+  RawBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt ResultsKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-partial-manifests
+            Status: Enabled
+            Prefix: parts/
+            ExpirationInDays: 7
+          - Id: expire-uploads
+            Status: Enabled
+            Prefix: uploads/
+            ExpirationInDays: 30
+
+  RawBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref RawBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt RawBucket.Arn
+              - !Sub ${RawBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # Holds only ciphertext (r/*.bin), manifest.json, release.json and, from M3, the PWA.
+  PublicBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      ObjectLockEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # With CloudFront: fully private, only CloudFront (OAC) reads it.
+      # Without CloudFront (EnableCdn=false): the bucket policy may grant public
+      # read over HTTPS. Everything in this bucket is meant to be public anyway:
+      # the app, ciphertext, manifest.json and release.json. ACLs stay blocked.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: !If [CdnEnabled, true, false]
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: !If [CdnEnabled, true, false]
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 2
+
+  PublicBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PublicBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - !If
+            - CdnEnabled
+            - Sid: AllowCloudFrontServicePrincipalReadOnly
+              Effect: Allow
+              Principal:
+                Service: cloudfront.amazonaws.com
+              Action: s3:GetObject
+              Resource: !Sub ${PublicBucket.Arn}/*
+              Condition:
+                StringEquals:
+                  AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+            - !Ref AWS::NoValue
+          - !If
+            - CdnEnabled
+            - !Ref AWS::NoValue
+            - Sid: PublicReadOfEncryptedContentOverHttps
+              Effect: Allow
+              Principal: '*'
+              Action: s3:GetObject
+              Resource: !Sub ${PublicBucket.Arn}/*
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt PublicBucket.Arn
+              - !Sub ${PublicBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # ------------------------------------------------------------------ CloudFront
+
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Condition: CdnEnabled
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-oac
+        Description: ZeroHour public bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # release.json is the only thing that changes at zero hour: cache it for seconds, not days.
+  ReleaseCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Condition: CdnEnabled
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub ${AWS::StackName}-release
+        Comment: release.json - at most 5 s stale
+        MinTTL: 0
+        DefaultTTL: 2
+        MaxTTL: 5
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: CdnEnabled
+    Properties:
+      DistributionConfig:
+        Comment: ZeroHour results
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: !Ref PriceClass
+        DefaultRootObject: index.html
+        Origins:
+          - Id: public-bucket
+            DomainName: !GetAtt PublicBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: public-bucket
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03 # Managed-SecurityHeadersPolicy
+        CacheBehaviors:
+          - PathPattern: release.json
+            TargetOriginId: public-bucket
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: !Ref ReleaseCachePolicy
+            ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+          - PathPattern: r/*
+            TargetOriginId: public-bucket
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            Compress: false # ciphertext doesn't compress
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+            ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+
+  # ------------------------------------------------------------------ Lambdas
+
+  CreateBatchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-create-batch
+      Description: New batch - KMS data key, DynamoDB record, locked release.json
+      CodeUri: dist/lambda/create-batch/
+      Handler: create-batch.handler
+      LoggingConfig:
+        LogGroup: !Ref CreateBatchLogs
+      Timeout: 30
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt BatchesTable.Arn
+            - Effect: Allow
+              Action: kms:GenerateDataKey
+              Resource: !GetAtt ResultsKey.Arn
+              Condition:
+                StringEquals:
+                  kms:EncryptionContext:app: zerohour
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt RawBucket.Arn
+              Condition:
+                StringLike:
+                  s3:prefix: parts/*
+            - Effect: Allow
+              Action: s3:DeleteObject
+              Resource: !Sub ${RawBucket.Arn}/parts/*
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub ${PublicBucket.Arn}/release.json
+
+  EncryptBatchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-encrypt-batch
+      Description: Distributed Map child - encrypt one batch of rows to r/<sha256>.bin under Object Lock
+      CodeUri: dist/lambda/encrypt-batch/
+      Handler: encrypt-batch.handler
+      LoggingConfig:
+        LogGroup: !Ref EncryptBatchLogs
+      MemorySize: 1024
+      Timeout: 300
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt BatchesTable.Arn
+            - Sid: UnwrapBatchMasterKey
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: !GetAtt ResultsKey.Arn
+              Condition:
+                StringEquals:
+                  kms:EncryptionContext:app: zerohour
+            - Sid: WriteEncryptedResults
+              Effect: Allow
+              Action: [s3:PutObject, s3:PutObjectRetention]
+              Resource: !Sub ${PublicBucket.Arn}/r/*
+            - Sid: WritePartialManifest
+              Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub ${RawBucket.Arn}/parts/*
+            - Sid: RawBucketSseKms
+              Effect: Allow
+              Action: [kms:GenerateDataKey, kms:Decrypt]
+              Resource: !GetAtt ResultsKey.Arn
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub s3.${AWS::Region}.amazonaws.com
+
+  FinalizeManifestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-finalize-manifest
+      Description: Merge partial manifests, check one file per CSV row, write manifest.json
+      CodeUri: dist/lambda/finalize-manifest/
+      Handler: finalize-manifest.handler
+      LoggingConfig:
+        LogGroup: !Ref FinalizeManifestLogs
+      MemorySize: 1024
+      Timeout: 120
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource: !GetAtt BatchesTable.Arn
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt RawBucket.Arn
+              Condition:
+                StringLike:
+                  s3:prefix: parts/*
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                - !Sub ${RawBucket.Arn}/parts/*
+                - !Sub ${RawBucket.Arn}/uploads/*
+            - Sid: RawBucketSseKms
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: !GetAtt ResultsKey.Arn
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub s3.${AWS::Region}.amazonaws.com
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub ${PublicBucket.Arn}/manifest.json
+
+  CreateBatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-create-batch
+      RetentionInDays: 7
+
+  EncryptBatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-encrypt-batch
+      RetentionInDays: 7
+
+  FinalizeManifestLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-finalize-manifest
+      RetentionInDays: 7
+
+  # ------------------------------------------------------------------ Step Functions
+
+  PublishStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub ${AWS::StackName}-publish
+      Type: STANDARD
+      DefinitionUri: statemachine/publish.asl.json
+      DefinitionSubstitutions:
+        CreateBatchFunctionArn: !GetAtt CreateBatchFunction.Arn
+        EncryptBatchFunctionArn: !GetAtt EncryptBatchFunction.Arn
+        FinalizeManifestFunctionArn: !GetAtt FinalizeManifestFunction.Arn
+        RawBucketName: !Ref RawBucket
+        ReleaseWaiterAliasArn: !Ref ReleaseWaiterFunction.Alias
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CreateBatchFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref EncryptBatchFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref FinalizeManifestFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ReleaseWaiterFunction
+        - Statement:
+            - Sid: DistributedMapChildren
+              Effect: Allow
+              Action: states:StartExecution
+              Resource: !Sub arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-publish
+            - Effect: Allow
+              Action: [states:DescribeExecution, states:StopExecution]
+              Resource: !Sub arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:${AWS::StackName}-publish:*
+            - Sid: ReadResultsCsv
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub ${RawBucket.Arn}/uploads/*
+            - Sid: RawBucketSseKms
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: !GetAtt ResultsKey.Arn
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub s3.${AWS::Region}.amazonaws.com
+
+  # ------------------------------------------------------------------ Release approval (M4)
+
+  # FLOW#<batchId> (status, approvers, approvedBy set, task token) and
+  # INVITE#<sha256(token)> (one per official). Raw link tokens are never stored.
+  ApprovalsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  ApprovalApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Description: ZeroHour approver links and public status
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 20
+
+  ApproveApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-approve-api
+      Description: Approver page (GET shows, POST approves) and public /status
+      CodeUri: dist/lambda/approve-api/
+      Handler: approve-api.handler
+      Timeout: 15
+      LoggingConfig:
+        LogGroup: !Ref ApproveApiLogs
+      Events:
+        ShowLink:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ApprovalApi
+            Path: /approve
+            Method: GET
+        Approve:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ApprovalApi
+            Path: /approve
+            Method: POST
+        Status:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ApprovalApi
+            Path: /status
+            Method: GET
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource: !GetAtt ApprovalsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt BatchesTable.Arn
+            - Sid: ResumeReleaseWorkflow
+              Effect: Allow
+              Action: states:SendTaskSuccess
+              Resource: !Sub arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-approval
+
+  # Dashboard data (M6): CloudFront traffic from CloudWatch + cost estimates.
+  MetricsApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-metrics-api
+      Description: GET /metrics - CloudFront traffic (CloudWatch) and cost estimates for the dashboard
+      CodeUri: dist/lambda/metrics-api/
+      Handler: metrics-api.handler
+      Timeout: 15
+      LoggingConfig:
+        LogGroup: !Ref MetricsApiLogs
+      Events:
+        Metrics:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ApprovalApi
+            Path: /metrics
+            Method: GET
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt BatchesTable.Arn
+            - Sid: ReadCloudFrontMetrics # GetMetricData does not support resource-level permissions
+              Effect: Allow
+              Action: cloudwatch:GetMetricData
+              Resource: '*'
+
+  MetricsApiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-metrics-api
+      RetentionInDays: 7
+
+  OpenApprovalsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-open-approvals
+      Description: Called with .waitForTaskToken at release time; opens approvals and stores the token
+      CodeUri: dist/lambda/open-approvals/
+      Handler: open-approvals.handler
+      Timeout: 15
+      LoggingConfig:
+        LogGroup: !Ref OpenApprovalsLogs
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource: !GetAtt ApprovalsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt BatchesTable.Arn
+
+  PublishKeyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-publish-key
+      Description: After 2 of 3 approvals - publish the 32-byte key in release.json
+      CodeUri: dist/lambda/publish-key/
+      Handler: publish-key.handler
+      Timeout: 30
+      LoggingConfig:
+        LogGroup: !Ref PublishKeyLogs
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource:
+                - !GetAtt BatchesTable.Arn
+                - !GetAtt ApprovalsTable.Arn
+            - Sid: UnwrapBatchMasterKey
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: !GetAtt ResultsKey.Arn
+              Condition:
+                StringEquals:
+                  kms:EncryptionContext:app: zerohour
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub ${PublicBucket.Arn}/release.json
+            - !If
+              - CdnEnabled
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+              - !Ref AWS::NoValue
+
+  ApproveApiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-approve-api
+      RetentionInDays: 7
+
+  OpenApprovalsLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-open-approvals
+      RetentionInDays: 7
+
+  PublishKeyLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-publish-key
+      RetentionInDays: 7
+
+  ApprovalStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub ${AWS::StackName}-approval
+      Type: STANDARD
+      DefinitionUri: statemachine/approval.asl.json
+      DefinitionSubstitutions:
+        OpenApprovalsFunctionArn: !GetAtt OpenApprovalsFunction.Arn
+        PublishKeyFunctionArn: !GetAtt PublishKeyFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref OpenApprovalsFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref PublishKeyFunction
+
+  # ------------------------------------------------------------------ Release waiter (M5)
+
+  # Lambda durable function: sleeps until releaseAt (no compute billed while suspended),
+  # then starts the approval workflow. Started async by the publish workflow.
+  ReleaseWaiterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-release-waiter
+      Description: Durable function - wait until releaseAt, then open approvals
+      CodeUri: dist/lambda/release-waiter/
+      Handler: release-waiter.handler
+      Timeout: 60
+      AutoPublishAlias: live
+      DurableConfig:
+        ExecutionTimeout: 31536000 # 365 days
+        RetentionPeriodInDays: 14
+      Environment:
+        Variables:
+          APPROVAL_STATE_MACHINE_ARN: !Ref ApprovalStateMachine
+      LoggingConfig:
+        LogGroup: !Ref ReleaseWaiterLogs
+      Policies:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicDurableExecutionRolePolicy
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt BatchesTable.Arn
+            - Sid: OpenApprovalsAtReleaseTime
+              Effect: Allow
+              Action: states:StartExecution
+              Resource: !Ref ApprovalStateMachine
+
+  ReleaseWaiterLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-release-waiter
+      RetentionInDays: 7
+
+Outputs:
+  ReleaseWaiterFunctionName:
+    Value: !Ref ReleaseWaiterFunction
+  ReleaseWaiterAliasArn:
+    Value: !Ref ReleaseWaiterFunction.Alias
+  ApprovalApiUrl:
+    Description: Base URL for approver links (/approve?t=...) and /status?batch=...
+    Value: !Sub https://${ApprovalApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  ApprovalStateMachineArn:
+    Value: !Ref ApprovalStateMachine
+  ApprovalsTableName:
+    Value: !Ref ApprovalsTable
+  SiteUrl:
+    Description: Public HTTPS base URL - CloudFront when enabled, else the S3 bucket (app at /index.html, results under /r/)
+    Value: !If
+      - CdnEnabled
+      - !Sub https://${Distribution.DomainName}
+      - !Sub https://${PublicBucket.RegionalDomainName}
+  DistributionId:
+    Condition: CdnEnabled
+    Value: !Ref Distribution
+  PublicBucketName:
+    Value: !Ref PublicBucket
+  RawBucketName:
+    Value: !Ref RawBucket
+  BatchesTableName:
+    Value: !Ref BatchesTable
+  PublishStateMachineArn:
+    Value: !Ref PublishStateMachine
+  ResultsKeyArn:
+    Value: !GetAtt ResultsKey.Arn
