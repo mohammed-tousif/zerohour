@@ -1,4 +1,4 @@
-# ZeroHour: exam results that can't crash on results day
+﻿# ZeroHour: exam results that can't crash on results day
 
 **Ship every result days early, encrypted. At zero hour, release only a 32-byte key.**
 
@@ -49,9 +49,9 @@ The whole stack is a single **AWS SAM** template. There are no servers, containe
 4. **Manifest:** `finalizeManifest` merges the partial manifests, checks there is **exactly one file per CSV row**, and publishes `manifest.json` with a root hash.
 5. **Schedule:** the last publish step starts the **durable `releaseWaiter`**. It reads `releaseAt` in a checkpointed step, then `wait`s, suspended, until then.
 6. **Zero hour:** the waiter starts the approval workflow. `openApprovals` stores the task token, and the workflow pauses. Approvals are refused before `releaseAt`.
-7. **Officials approve:** each official opens a one-time link (the database stores only the SHA-256 of the token) and taps **Approve**. The approval that reaches 2 of 3 flips `OPEN → APPROVED` with a DynamoDB condition, and calls **`SendTaskSuccess`**.
+7. **Officials approve:** each official opens a one-time link (the database stores only the SHA-256 of the token) and taps **Approve**. The approval that reaches 2 of 3 flips `OPEN â†’ APPROVED` with a DynamoDB condition, and calls **`SendTaskSuccess`**.
 8. **Key published:** `publishKey` unwraps the master key with KMS and writes `release.json {released:true, key}`. With CloudFront on, it also invalidates the cached copy.
-9. **Phones open results:** every waiting phone checks `release.json` every 2–3 s (with jitter), finds the key, and decrypts.
+9. **Phones open results:** every waiting phone checks `release.json` every 2â€“3 s (with jitter), finds the key, and decrypts.
 
 ## It runs: measured on AWS
 
@@ -59,18 +59,18 @@ The whole stack is a single **AWS SAM** template. There are no servers, containe
 |---|---|
 | Encrypt + stage 50,000 results | **37 s** end to end (143 parallel batches) |
 | Durable waiter: scheduled wake-up vs actual | woke **0.35 s** after its scheduled time; approvals open **2.9 s** after release time, untouched |
-| 2nd official taps Approve → key public | **1.6 s** |
-| Decrypt on the phone | **≈ 3–4 ms** |
+| 2nd official taps Approve â†’ key public | **1.6 s** |
+| Decrypt on the phone | **â‰ˆ 3â€“4 ms** |
 | Integrity | 25/25 sampled files match the manifest and decrypt to exactly their source rows |
-| Tests | 151 automated tests: the crypto round trip (Node encrypt ↔ browser WebCrypto decrypt, plus a fixed test vector), approval rules (1 approval stays locked, 2 releases, duplicates ignored, expired links rejected, simultaneous taps release once), the durable waiter (official local test runner), and template guards |
+| Tests | 153 automated tests: the crypto round trip (Node encrypt â†” browser WebCrypto decrypt, plus a fixed test vector), approval rules (1 approval stays locked, 2 releases, duplicates ignored, expired links rejected, simultaneous taps release once), the durable waiter (official local test runner), and template guards |
 
 ## What it costs
 
 These are list-price estimates from the AWS Price List for Mumbai and India, shown live on the dashboard:
 
-- **Staging 50,000 encrypted results:** ≈ **$0.26**, almost all of it S3 PUTs.
-- **Results day for 50,000 students** each checking 100 times (5.05M requests): **$0** inside CloudFront's always-free tier, or ≈ $2.11 served straight from S3.
-- **Idle:** ≈ **$1/month**, which is the KMS key.
+- **Staging 50,000 encrypted results:** â‰ˆ **$0.26**, almost all of it S3 PUTs.
+- **Results day for 50,000 students** each checking 100 times (5.05M requests): **$0** inside CloudFront's always-free tier, or â‰ˆ $2.11 served straight from S3.
+- **Idle:** â‰ˆ **$1/month**, which is the KMS key.
 
 ## Security, and what it doesn't claim
 
@@ -92,7 +92,7 @@ The idea is **"publish early, encrypted; release a key on approval"**. It fits a
 - **S3 Object Lock uploads must carry a checksum.** I added `ChecksumAlgorithm: SHA256`.
 - **WebCrypto and service workers only work on secure (HTTPS) pages.** That forced the S3-HTTPS demo path while CloudFront waits for account verification.
 - **SAM's in-source build runs an `npm update` that strips dev dependencies.** Bundling with esbuild myself kept builds fast and predictable.
-- **Rehearse the demo.** A dry run caught a real bug: result files were cached "forever" under `sha256(USN)`, so the same student in a new batch got last batch's cached file. Results are now stored per batch (`r/<batch>/…`), and the app re-downloads when a new batch goes live. A regression test now guards it.
+- **Rehearse the demo.** A dry run caught a real bug: result files were cached "forever" under `sha256(USN)`, so the same student in a new batch got last batch's cached file. Results are now stored per batch (`r/<batch>/â€¦`), and the app re-downloads when a new batch goes live. A regression test now guards it.
 
 ## Try it
 
