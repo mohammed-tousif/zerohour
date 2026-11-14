@@ -1,10 +1,12 @@
-# ZeroHour
+﻿# ZeroHour
 
 **Exam results that can't crash on results day.**
 
 Every year results websites go down the moment results are announced. ZeroHour borrows how game launches work: every student's result is encrypted and pushed to the CDN *days early*, and at zero hour the only thing anyone downloads is a **32-byte key**. Decryption happens on the student's phone.
 
 > All data in this repo is synthetic. IDs look like `DEMO23CS00001` and names like `Demo Student 00001`.
+
+**Demo video (2:08):** https://youtu.be/50Qq4v5fQLI
 
 **Live demo (S3 direct over HTTPS):**
 - Student app: https://zerohour-publicbucket-u1yrxzfhm0pv.s3.ap-south-1.amazonaws.com/index.html
@@ -16,13 +18,13 @@ CloudFront is built into the template (`EnableCdn=true`) but is waiting on AWS a
 
 | Milestone | What | State |
 |---|---|---|
-| M1 | Crypto module, synthetic data, local encrypt → decrypt round trip | ✅ done |
-| M2 | SAM stack: S3, CloudFront, Step Functions Distributed Map publish | ✅ deployed; 50,000 results staged in 37 s. CloudFront waits on AWS account verification ([notes](docs/M2-NOTES.md)) |
-| M3 | Student PWA: pre-fetch + WebCrypto decrypt | ✅ tested in the browser: locked → auto-decrypt in under 3 s, works offline ([notes](docs/M3-NOTES.md)) |
-| M4 | 2-of-3 approval flow + publishKey | ✅ proven on AWS: 1 approval stays locked, 2nd releases the key in 3.5 s ([notes](docs/M4-NOTES.md)) |
-| M5 | Durable-function release waiter | ✅ proven on AWS (Mumbai): slept 5 min at no compute cost, opened approvals 2.9 s after releaseAt by itself ([notes](docs/M5-NOTES.md)) |
-| M6 | Dashboard, load test, cost counter | ✅ dashboard + cost counter live against AWS; load test ready, waiting on CloudFront ([notes](docs/M6-NOTES.md)) |
-| M7 | Builder Center write-up, architecture diagram, demo video | ✅ [write-up](docs/WRITEUP.md), [diagram](docs/architecture.png), [screenshots](docs/screenshots/), [video script](docs/VIDEO-SCRIPT.md); video still to record |
+| M1 | Crypto module, synthetic data, local encrypt â†’ decrypt round trip | âœ… done |
+| M2 | SAM stack: S3, CloudFront, Step Functions Distributed Map publish | âœ… deployed; 50,000 results staged in 37 s. CloudFront waits on AWS account verification ([notes](docs/M2-NOTES.md)) |
+| M3 | Student PWA: pre-fetch + WebCrypto decrypt | âœ… tested in the browser: locked â†’ auto-decrypt in under 3 s, works offline ([notes](docs/M3-NOTES.md)) |
+| M4 | 2-of-3 approval flow + publishKey | âœ… proven on AWS: 1 approval stays locked, 2nd releases the key in 3.5 s ([notes](docs/M4-NOTES.md)) |
+| M5 | Durable-function release waiter | âœ… proven on AWS (Mumbai): slept 5 min at no compute cost, opened approvals 2.9 s after releaseAt by itself ([notes](docs/M5-NOTES.md)) |
+| M6 | Dashboard, load test, cost counter | âœ… dashboard + cost counter live against AWS; load test ready, waiting on CloudFront ([notes](docs/M6-NOTES.md)) |
+| M7 | Builder Center write-up, architecture diagram, demo video | âœ… [write-up](docs/WRITEUP.md), [diagram](docs/architecture.png), [screenshots](docs/screenshots/), [video script](docs/VIDEO-SCRIPT.md); video still to record |
 
 ![ZeroHour architecture](docs/architecture.png)
 
@@ -33,8 +35,8 @@ Requires Node.js 22 or later.
 ```bash
 npm install
 npm test                    # 58 unit tests
-npm run gen                 # 50,000 synthetic students → data/results.csv
-npm run stage               # encrypt all → out/public/r/*.bin + manifest + release.json (locked)
+npm run gen                 # 50,000 synthetic students â†’ data/results.csv
+npm run stage               # encrypt all â†’ out/public/r/*.bin + manifest + release.json (locked)
 npm run verify              # proves nothing can be opened before release
 npm run release:local       # publishes the key in release.json
 npm run verify -- --sample 500   # 500 random students decrypt with WebCrypto
@@ -47,7 +49,7 @@ Measured on a Windows laptop (10 Nov 2026): staging 50,000 results took 9.1 s, o
 ```bash
 npm run stage -- --release-at 2026-11-16T04:30:00Z
 npm run web:build && npm run web:serve     # open http://localhost:5173
-# enter DEMO23CS00001 / 22-05-2005 → saved & locked
+# enter DEMO23CS00001 / 22-05-2005 â†’ saved & locked
 npm run release:local                      # the page decrypts by itself within ~3 s
 ```
 
@@ -62,11 +64,11 @@ npm run destroy                   # after judging: empties buckets (bypassing Ob
 ```
 
 ```
-CSV ─► S3 raw (KMS) ─► Step Functions ─► CreateBatch (KMS data key → DynamoDB, release.json locked)
-                              │
-                              ├─► Distributed Map, 350 rows per child ─► encryptBatch ─► S3 public r/<sha256>.bin (Object Lock)
-                              │
-                              └─► FinalizeManifest ─► manifest.json (row count checked) ─► CloudFront (OAC)
+CSV â”€â–º S3 raw (KMS) â”€â–º Step Functions â”€â–º CreateBatch (KMS data key â†’ DynamoDB, release.json locked)
+                              â”‚
+                              â”œâ”€â–º Distributed Map, 350 rows per child â”€â–º encryptBatch â”€â–º S3 public r/<sha256>.bin (Object Lock)
+                              â”‚
+                              â””â”€â–º FinalizeManifest â”€â–º manifest.json (row count checked) â”€â–º CloudFront (OAC)
 ```
 
 ## How the crypto works
